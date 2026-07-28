@@ -1,0 +1,206 @@
+"""Qwen2 forward pass, written from scratch.
+
+Week 1 deliberately has **no KV cache**: every decode step re-runs the full
+forward over the whole sequence. That is O(n^2) and slow on purpose. It is the
+floor that everything after it is measured against, and — more importantly —
+it is a correctness reference that stays valid for the whole project. When the
+paged cache lands in week 3 and the Triton kernel in week 5, they are checked
+against *this*, and against HuggingFace, for exact greedy-token equality.
+
+Module and parameter names mirror the HuggingFace Qwen2 checkpoint layout so
+weights load with a plain ``load_state_dict``. Do not rename anything here
+without also updating pyre/loader.py.
+"""
+
+from __future__ import annotations
+
+import torch
+from torch import nn
+
+from pyre.config import ModelConfig
+
+
+class RMSNorm(nn.Module):
+    """Root-mean-square layernorm.
+
+    The float32 upcast is not optional. Computing the variance in fp16
+    overflows on activations with large magnitude and silently produces NaNs
+    a few layers in. HF does the same thing; we match it exactly because
+    parity is checked at the token level.
+    """
+
+    def __init__(self, hidden_size: int, eps: float):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dtype = x.dtype
+        x = x.to(torch.float32)
+        var = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(var + self.eps)
+        return self.weight * x.to(dtype)
+
+
+def build_rope_cache(
+    seq_len: int, head_dim: int, theta: float, device: torch.device, dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Precompute cos/sin tables of shape (seq_len, head_dim).
+
+    Built in float32 then cast, because at rope_theta=1e6 the low-frequency
+    terms lose too much precision in fp16 to be stable over long contexts.
+    """
+    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim))
+    t = torch.arange(seq_len, dtype=torch.float32, device=device)
+    freqs = torch.outer(t, inv_freq)                       # (seq_len, head_dim/2)
+    emb = torch.cat([freqs, freqs], dim=-1)                # (seq_len, head_dim)
+    return emb.cos().to(dtype), emb.sin().to(dtype)
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    half = x.shape[-1] // 2
+    return torch.cat([-x[..., half:], x[..., :half]], dim=-1)
+
+
+def apply_rope(
+    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """q, k: (B, H, S, D). cos, sin: (S, D) — broadcast over batch and heads."""
+    cos = cos.unsqueeze(0).unsqueeze(0)
+    sin = sin.unsqueeze(0).unsqueeze(0)
+    return q * cos + rotate_half(q) * sin, k * cos + rotate_half(k) * sin
+
+
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """(B, KV, S, D) -> (B, KV*n_rep, S, D).
+
+    Query head ``i`` must attend to kv head ``i // n_rep``. ``repeat_interleave``
+    on dim 1 gives that; ``repeat`` gives the wrong mapping and produces output
+    that is subtly wrong rather than obviously broken. Verified in tests.
+    """
+    if n_rep == 1:
+        return x
+    return x.repeat_interleave(n_rep, dim=1)
+
+
+class Attention(nn.Module):
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.n_heads = cfg.num_attention_heads
+        self.n_kv = cfg.num_key_value_heads
+        self.head_dim = cfg.head_dim
+        self.scale = self.head_dim ** -0.5
+
+        # Qwen2 carries bias on q/k/v and none on o_proj.
+        self.q_proj = nn.Linear(cfg.hidden_size, self.n_heads * self.head_dim, bias=True)
+        self.k_proj = nn.Linear(cfg.hidden_size, self.n_kv * self.head_dim, bias=True)
+        self.v_proj = nn.Linear(cfg.hidden_size, self.n_kv * self.head_dim, bias=True)
+        self.o_proj = nn.Linear(self.n_heads * self.head_dim, cfg.hidden_size, bias=False)
+
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        B, S, _ = x.shape
+
+        q = self.q_proj(x).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, S, self.n_kv, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, S, self.n_kv, self.head_dim).transpose(1, 2)
+
+        q, k = apply_rope(q, k, cos, sin)
+        k = repeat_kv(k, self.cfg.n_rep)
+        v = repeat_kv(v, self.cfg.n_rep)
+
+        # Written out by hand rather than calling SDPA. This is the exact
+        # computation the Triton kernel replaces in week 5, so it needs to be
+        # visible and comparable.
+        scores = torch.matmul(q, k.transpose(-1, -2)) * self.scale     # (B, H, S, S)
+        mask = torch.full((S, S), torch.finfo(scores.dtype).min, device=x.device, dtype=scores.dtype)
+        mask = torch.triu(mask, diagonal=1)
+        scores = scores + mask
+
+        probs = torch.softmax(scores.to(torch.float32), dim=-1).to(q.dtype)
+        out = torch.matmul(probs, v)                                   # (B, H, S, D)
+        out = out.transpose(1, 2).reshape(B, S, self.n_heads * self.head_dim)
+        return self.o_proj(out)
+
+
+class MLP(nn.Module):
+    """SwiGLU: down(silu(gate(x)) * up(x))."""
+
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.gate_proj = nn.Linear(cfg.hidden_size, cfg.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(cfg.hidden_size, cfg.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(cfg.intermediate_size, cfg.hidden_size, bias=False)
+        self.act = nn.SiLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down_proj(self.act(self.gate_proj(x)) * self.up_proj(x))
+
+
+class DecoderLayer(nn.Module):
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.self_attn = Attention(cfg)
+        self.mlp = MLP(cfg)
+        self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
+
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        x = x + self.self_attn(self.input_layernorm(x), cos, sin)
+        x = x + self.mlp(self.post_attention_layernorm(x))
+        return x
+
+
+class _Inner(nn.Module):
+    """Exists only so parameter names come out as ``model.layers.0.…``,
+    matching the HuggingFace checkpoint."""
+
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
+        self.layers = nn.ModuleList(DecoderLayer(cfg) for _ in range(cfg.num_hidden_layers))
+        self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
+
+
+class PyreQwen2(nn.Module):
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.model = _Inner(cfg)
+        self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
+        self._rope_len = 0
+        self._cos: torch.Tensor | None = None
+        self._sin: torch.Tensor | None = None
+
+    def _rope(self, seq_len: int, device, dtype):
+        if self._cos is None or seq_len > self._rope_len or self._cos.device != device:
+            n = max(seq_len, 512)
+            self._cos, self._sin = build_rope_cache(n, self.cfg.head_dim, self.cfg.rope_theta, device, dtype)
+            self._rope_len = n
+        return self._cos[:seq_len], self._sin[:seq_len]
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """input_ids: (B, S) -> logits (B, S, vocab)."""
+        B, S = input_ids.shape
+        x = self.model.embed_tokens(input_ids)
+        cos, sin = self._rope(S, x.device, x.dtype)
+        for layer in self.model.layers:
+            x = layer(x, cos, sin)
+        x = self.model.norm(x)
+        return self.lm_head(x)
+
+    @torch.inference_mode()
+    def generate_greedy(self, input_ids: torch.Tensor, max_new_tokens: int, eos_id: int | None = None):
+        """Naive greedy decode. Recomputes the whole forward every step.
+
+        This is the slow reference. Do not optimise it — its job is to stay
+        obviously correct so later versions have something to be checked against.
+        """
+        ids = input_ids
+        for _ in range(max_new_tokens):
+            logits = self.forward(ids)
+            nxt = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            ids = torch.cat([ids, nxt], dim=1)
+            if eos_id is not None and bool((nxt == eos_id).all()):
+                break
+        return ids

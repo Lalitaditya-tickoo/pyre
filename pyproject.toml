@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyre-llm"
+version = "0.0.1"
+description = "An LLM inference engine for Turing-generation GPUs (sm_75)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Lalitaditya Tickoo" }]
+dependencies = [
+    "torch>=2.1",
+    "transformers>=4.40",
+    "safetensors>=0.4",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.4"]
+serve = ["fastapi", "uvicorn"]
+
+[tool.setuptools.packages.find]
+include = ["pyre*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+markers = ["gpu: requires a CUDA device and downloaded model weights"]
