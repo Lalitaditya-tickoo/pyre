@@ -96,15 +96,16 @@ def test_cached_matches_naive(prompt, pyre_model):
         )
 
 
-@requires_cuda
-@pytest.mark.gpu
-def test_incremental_prefill_matches_full_prefill(pyre_model):
-    """Feeding a prompt in chunks must equal feeding it whole.
+@pytest.fixture(scope="module")
+def pyre_model_fp32():
+    from pyre.loader import load_model
 
-    This is week 4 chunked prefill checked early, and it is the sharpest test of
-    the start_pos plumbing: it exercises S > 1 with a non-zero offset, which
-    neither prefill (offset 0) nor decode (S == 1) does.
-    """
+    model, _ = load_model(MODEL, device="cuda", dtype=torch.float32)
+    return model
+
+
+def _chunked_vs_whole(model, dtype):
+    """Run a prompt whole, then split in two; return second-half logits from each."""
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(MODEL)
@@ -112,15 +113,57 @@ def test_incremental_prefill_matches_full_prefill(pyre_model):
     split = ids.shape[1] // 2
 
     with torch.inference_mode():
-        whole_cache = KVCache.for_model(pyre_model.cfg, 1, ids.shape[1], "cuda", torch.float16)
-        whole = pyre_model(ids, whole_cache, start_pos=0)
+        c1 = KVCache.for_model(model.cfg, 1, ids.shape[1], "cuda", dtype)
+        whole = model(ids, c1, start_pos=0)
 
-        chunk_cache = KVCache.for_model(pyre_model.cfg, 1, ids.shape[1], "cuda", torch.float16)
-        pyre_model(ids[:, :split], chunk_cache, start_pos=0)
-        chunked = pyre_model(ids[:, split:], chunk_cache, start_pos=split)
+        c2 = KVCache.for_model(model.cfg, 1, ids.shape[1], "cuda", dtype)
+        model(ids[:, :split], c2, start_pos=0)
+        chunked = model(ids[:, split:], c2, start_pos=split)
 
-    diff = (whole[:, split:].float() - chunked.float()).abs().max().item()
-    assert diff < 1e-2, f"chunked prefill differs from full prefill by {diff:.6f}"
+    return whole[:, split:].float(), chunked.float()
+
+
+@requires_cuda
+@pytest.mark.gpu
+def test_incremental_prefill_matches_full_prefill_fp32(pyre_model_fp32):
+    """Feeding a prompt in chunks must equal feeding it whole.
+
+    Week 4 chunked prefill checked early, and the sharpest test of the start_pos
+    plumbing: it exercises S > 1 at a non-zero offset, which neither prefill
+    (offset 0) nor decode (S == 1) does.
+
+    Run in fp32 because the two paths issue differently-shaped matmuls --
+    (S=half, T=full) vs (S=full, T=full) -- so cuBLAS tiles them differently and
+    accumulates in a different order. In fp16 that is ~2 ULP, which would force a
+    tolerance loose enough to hide a real off-by-one. fp32 removes the noise so
+    the bound can be tight enough to mean something.
+    """
+    whole, chunked = _chunked_vs_whole(pyre_model_fp32, torch.float32)
+    diff = (whole - chunked).abs().max().item()
+    assert diff < 1e-3, (
+        f"chunked prefill differs by {diff:.6f} in fp32 -- not rounding. Check the "
+        "causal mask offset (should be start_pos + 1) and the RoPE position slice."
+    )
+
+
+@requires_cuda
+@pytest.mark.gpu
+def test_incremental_prefill_argmax_matches_fp16(pyre_model):
+    """In fp16 the logits differ by a couple of ULP; the decisions must not.
+
+    Bit-equality is the wrong bar. argmax agreement is what propagates into
+    generated tokens, and it is what a real regression would break.
+    """
+    whole, chunked = _chunked_vs_whole(pyre_model, torch.float16)
+    assert whole.argmax(-1).flatten().tolist() == chunked.argmax(-1).flatten().tolist(), \
+        "chunked prefill changed an argmax decision, not just its rounding"
+
+    diff = (whole - chunked).abs().max().item()
+    scale = whole.abs().max().item()
+    assert diff / scale < 0.01, (
+        f"fp16 gap {diff:.4f} is {100 * diff / scale:.2f}% of logit scale {scale:.1f} "
+        "-- larger than differing GEMM shapes alone explain"
+    )
 
 
 @requires_cuda
