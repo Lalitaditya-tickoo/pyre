@@ -1,0 +1,180 @@
+{
+  "environment": {
+    "gpu": {
+      "name": "Tesla T4",
+      "capability": "sm_75",
+      "total_memory_gb": 14.56,
+      "count": 2
+    },
+    "torch": "2.10.0+cu128",
+    "cuda": "12.8",
+    "python": "3.12.13",
+    "git_sha": "588d000",
+    "timestamp": "2026-07-28T10:12:13"
+  },
+  "extra": {
+    "model": "Qwen/Qwen2.5-1.5B-Instruct"
+  },
+  "measurements": [
+    {
+      "backend": "hf",
+      "suite": "short",
+      "batch_size": 1,
+      "max_new_tokens": 128,
+      "ttft_s": 0.0398,
+      "total_s": 4.5358,
+      "decode_tps": 28.25,
+      "total_tps": 28.22,
+      "peak_mem_gb": 2.89,
+      "samples_s": [
+        4.5358,
+        4.5382,
+        4.5313
+      ]
+    },
+    {
+      "backend": "hf",
+      "suite": "short",
+      "batch_size": 4,
+      "max_new_tokens": 128,
+      "ttft_s": 0.0353,
+      "total_s": 4.059,
+      "decode_tps": 126.25,
+      "total_tps": 126.14,
+      "peak_mem_gb": 2.92,
+      "samples_s": [
+        4.0442,
+        4.059,
+        4.1291
+      ]
+    },
+    {
+      "backend": "hf",
+      "suite": "short",
+      "batch_size": 8,
+      "max_new_tokens": 128,
+      "ttft_s": 0.0368,
+      "total_s": 4.2618,
+      "decode_tps": 240.47,
+      "total_tps": 240.27,
+      "peak_mem_gb": 2.94,
+      "samples_s": [
+        4.2618,
+        4.2331,
+        4.2695
+      ]
+    },
+    {
+      "backend": "hf",
+      "suite": "short",
+      "batch_size": 16,
+      "max_new_tokens": 128,
+      "ttft_s": 0.0439,
+      "total_s": 4.2739,
+      "decode_tps": 480.38,
+      "total_tps": 479.19,
+      "peak_mem_gb": 3.03,
+      "samples_s": [
+        4.2739,
+        4.2924,
+        4.272
+      ]
+    },
+    {
+      "backend": "hf",
+      "suite": "short",
+      "batch_size": 32,
+      "max_new_tokens": 128,
+      "ttft_s": 0.0798,
+      "total_s": 4.5303,
+      "decode_tps": 913.16,
+      "total_tps": 904.14,
+      "peak_mem_gb": 3.11,
+      "samples_s": [
+        4.5303,
+        4.5401,
+        4.4418
+      ]
+    },
+    {
+      "backend": "hf",
+      "suite": "shared_prefix",
+      "batch_size": 1,
+      "max_new_tokens": 128,
+      "ttft_s": 0.0419,
+      "total_s": 4.6134,
+      "decode_tps": 27.78,
+      "total_tps": 27.75,
+      "peak_mem_gb": 2.9,
+      "samples_s": [
+        4.6134,
+        4.5902,
+        4.6379
+      ]
+    },
+    {
+      "backend": "hf",
+      "suite": "shared_prefix",
+      "batch_size": 4,
+      "max_new_tokens": 128,
+      "ttft_s": 0.0541,
+      "total_s": 4.1738,
+      "decode_tps": 123.31,
+      "total_tps": 122.67,
+      "peak_mem_gb": 2.92,
+      "samples_s": [
+        4.185,
+        4.1255,
+        4.1738
+      ]
+    },
+    {
+      "backend": "hf",
+      "suite": "shared_prefix",
+      "batch_size": 8,
+      "max_new_tokens": 128,
+      "ttft_s": 0.1275,
+      "total_s": 4.3156,
+      "decode_tps": 242.59,
+      "total_tps": 237.28,
+      "peak_mem_gb": 2.95,
+      "samples_s": [
+        4.3219,
+        4.3011,
+        4.3156
+      ]
+    },
+    {
+      "backend": "hf",
+      "suite": "shared_prefix",
+      "batch_size": 16,
+      "max_new_tokens": 128,
+      "ttft_s": 0.2184,
+      "total_s": 4.4741,
+      "decode_tps": 477.48,
+      "total_tps": 457.74,
+      "peak_mem_gb": 3.03,
+      "samples_s": [
+        4.4416,
+        4.4788,
+        4.4741
+      ]
+    },
+    {
+      "backend": "hf",
+      "suite": "shared_prefix",
+      "batch_size": 32,
+      "max_new_tokens": 128,
+      "ttft_s": 0.3981,
+      "total_s": 5.2079,
+      "decode_tps": 844.95,
+      "total_tps": 786.5,
+      "peak_mem_gb": 3.15,
+      "samples_s": [
+        5.2079,
+        5.2246,
+        5.1983
+      ]
+    }
+  ]
+}
