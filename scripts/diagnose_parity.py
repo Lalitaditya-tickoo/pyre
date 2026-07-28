@@ -124,6 +124,7 @@ def main() -> None:
         hf_gen = hf.generate(
             ids, max_new_tokens=args.tokens, min_new_tokens=args.tokens,
             do_sample=False, use_cache=True, pad_token_id=tok.eos_token_id,
+            repetition_penalty=1.0,
         )
     pyre_gen = pyre.generate_greedy(ids, max_new_tokens=args.tokens)
 

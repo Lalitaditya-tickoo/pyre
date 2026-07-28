@@ -43,7 +43,7 @@ def hf_pair():
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(MODEL)
-    model = AutoModelForCausalLM.from_pretrained(MODEL, torch_dtype=torch.float16).cuda().eval()
+    model = AutoModelForCausalLM.from_pretrained(MODEL, torch_dtype=torch.float16, attn_implementation="eager").cuda().eval()
     return tok, model
 
 
@@ -67,6 +67,7 @@ def test_greedy_token_parity(prompt, hf_pair, pyre_model):
         hf_out = hf.generate(
             ids, max_new_tokens=n, min_new_tokens=n,
             do_sample=False, use_cache=True, pad_token_id=tok.eos_token_id,
+            repetition_penalty=1.0,   # Qwen ships 1.1; pyre does pure argmax
         )
     pyre_out = pyre_model.generate_greedy(ids, max_new_tokens=n)
 
@@ -104,7 +105,7 @@ def test_logits_close(hf_pair, pyre_model):
 
     assert hf_logits.shape == pyre_logits.shape
     max_abs = (hf_logits - pyre_logits).abs().max().item()
-    assert max_abs < 0.05, f"max abs logit diff {max_abs:.4f} — forward pass differs from HF"
+    assert max_abs < 1e-2, f"max abs logit diff {max_abs:.6f} — forward pass differs from HF eager"
 
 
 def test_repeat_kv_head_mapping():

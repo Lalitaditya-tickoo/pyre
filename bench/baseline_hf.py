@@ -41,6 +41,7 @@ def build_backend(model_id: str, device: str):
             max_new_tokens=max_new_tokens,
             min_new_tokens=max_new_tokens,   # no early EOS, so token counts are exact
             do_sample=False,                 # greedy: comparable across backends
+            repetition_penalty=1.0,          # Qwen ships 1.1; pyre does pure argmax
             use_cache=True,
             pad_token_id=tok.pad_token_id,
         )
