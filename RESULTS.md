@@ -95,6 +95,47 @@ Two consequences for the rest of the project:
 PYRE-cached also beats HF `generate()` at batch 1 (35.4 vs 28.2 tok/s, 1.26×),
 from lower per-step Python overhead — attention is still unfused until week 5.
 
+
+```bash
+python bench/sweep_length.py --lengths 32 64 128 256 512 1024
+```
+
+Batch 1, Qwen2.5-1.5B, fp16, T4. Prompt fixed; generation length swept.
+
+| gen tokens | naive tok/s | cached tok/s | speedup | cache reserved |
+|---|---|---|---|---|
+| 32 | 32.3 | 33.9 | 1.05× | 1.1 MB |
+| 64 | 32.4 | 35.2 | 1.09× | 2.0 MB |
+| 128 | 32.9 | 35.6 | 1.08× | 3.7 MB |
+| 256 | 27.7 | 34.9 | 1.26× | 7.2 MB |
+| 512 | 17.5 | 34.8 | 1.99× | 14.2 MB |
+| 1024 | 8.9 | **35.3** | **3.95×** | 28.2 MB |
+
+**Cached throughput is flat at ~35 tok/s across a 32× range in sequence length.**
+That is the result. Constant per-token cost is what O(n) decode looks like; the
+naive path collapses from 32.3 to 8.9 tok/s over the same range as its O(n²)
+attention term grows.
+
+**The cache does almost nothing below 256 tokens, and that is not a defect.**
+At batch 1 decode is bound by streaming ~3.1 GB of fp16 weights from HBM per
+forward pass. On a T4 at ~320 GB/s that is ~10 ms of unavoidable memory traffic.
+Attention over a few hundred tokens costs microseconds by comparison, so the
+naive path's redundant work hides entirely inside the bandwidth floor. The cache
+only starts paying once the quadratic term climbs out from under it — measured
+crossover, 256 tokens.
+
+Two consequences for the rest of the project:
+
+- **Batching, not caching, is the lever for throughput.** One weight read
+  amortised across many sequences is where a 4× lives. Week 4 is load-bearing.
+- The contiguous cache reserves `prompt_len + max_new_tokens` up front —
+  28.2 MB per sequence at 1024 tokens, whether or not the sequence gets there.
+  At batch 32 that is ~900 MB reserved for a worst case that mostly will not
+  happen. Week 3 is the fix.
+
+PYRE-cached also beats HF `generate()` at batch 1 (35.4 vs 28.2 tok/s, 1.26×),
+from lower per-step Python overhead — attention is still unfused until week 5.
+
 ## Week 3 — paged KV cache
 ## Week 4 — continuous batching
 ## Week 5 — Triton paged-attention kernel
