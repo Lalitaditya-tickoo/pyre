@@ -72,4 +72,8 @@ def load_model(
         )
 
     model = model.to(device=device, dtype=dtype).eval()
+    # Inference only: nothing here needs a gradient. Without this, autograd
+    # tracks every forward -- which costs time, and makes RoPE tables built
+    # under inference_mode unusable in a normally-tracked call later.
+    model.requires_grad_(False)
     return model, cfg

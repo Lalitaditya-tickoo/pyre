@@ -111,12 +111,13 @@ def test_incremental_prefill_matches_full_prefill(pyre_model):
     ids = tok(PROMPTS[0] + " It maps keys to values.", return_tensors="pt").input_ids.cuda()
     split = ids.shape[1] // 2
 
-    whole_cache = KVCache.for_model(pyre_model.cfg, 1, ids.shape[1], "cuda", torch.float16)
-    whole = pyre_model(ids, whole_cache, start_pos=0)
+    with torch.inference_mode():
+        whole_cache = KVCache.for_model(pyre_model.cfg, 1, ids.shape[1], "cuda", torch.float16)
+        whole = pyre_model(ids, whole_cache, start_pos=0)
 
-    chunk_cache = KVCache.for_model(pyre_model.cfg, 1, ids.shape[1], "cuda", torch.float16)
-    pyre_model(ids[:, :split], chunk_cache, start_pos=0)
-    chunked = pyre_model(ids[:, split:], chunk_cache, start_pos=split)
+        chunk_cache = KVCache.for_model(pyre_model.cfg, 1, ids.shape[1], "cuda", torch.float16)
+        pyre_model(ids[:, :split], chunk_cache, start_pos=0)
+        chunked = pyre_model(ids[:, split:], chunk_cache, start_pos=split)
 
     diff = (whole[:, split:].float() - chunked.float()).abs().max().item()
     assert diff < 1e-2, f"chunked prefill differs from full prefill by {diff:.6f}"
