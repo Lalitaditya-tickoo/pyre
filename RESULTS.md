@@ -203,6 +203,37 @@ all B sequences in one launch — which is what converts this scaling into real
 throughput. The gap between 59 and HF's 904 is precisely the kernel's job.
 
 ## Week 5 — Triton paged-attention kernel
+
+The week-4 scheduler was correct but launch-bound: attention ran as a Python
+loop over sequences, ~B×L kernel launches per decode step. This replaces it with
+a hand-written Triton kernel — one program per (sequence, query head) that reads
+K/V straight from the sequence's scattered blocks via its block table, with an
+online-softmax accumulation. No gather, no per-sequence Python loop, one launch.
+
+**FlashAttention-2 requires Ampere (sm_80+). The T4 is Turing (sm_75), so the
+fused kernel had to be written by hand — that is the whole point of targeting
+this hardware.**
+
+Correctness: matches PyTorch attention to <1e-3 on *scrambled, non-contiguous*
+block tables, and the full scheduler using it produces token-identical output to
+single-sequence decoding (`test_batched_matches_single`, run against the
+committed kernel).
+
+Throughput vs the unfused week-4 path (Qwen2.5-0.5B, gen_len 64, T4):
+
+| batch | week 4 tok/s | week 5 tok/s | speedup |
+|---|---|---|---|
+| 1 | 27.9 | 37.9 | 1.36× |
+| 4 | 48.2 | 83.4 | 1.73× |
+| 8 | 53.3 | 107.0 | 2.01× |
+| 16 | 56.9 | 124.5 | 2.19× |
+| 32 | 59.1 | **138.2** | **2.34×** |
+
+The speedup *grows* with batch size — 1.36× at batch 1 to 2.34× at batch 32.
+That growth is the signature of removing a launch-bound bottleneck: the more
+sequences batched, the more per-sequence launches the kernel eliminates. Week 4's
+flat 28→59 became a climbing 38→138.
+
 ## Week 6 — radix prefix cache
 ## Week 7 — speculative decoding
 ## Week 8 — vLLM comparison
