@@ -117,6 +117,9 @@ class PagedKVCache:
         self.block_tables: dict[int, list[int]] = {}
         # seq_id -> number of tokens currently stored
         self.seq_len: dict[int, int] = {}
+        # tokens written in the current pass; advances on layer 0 so gather()
+        # sees the full prefix on every layer, not just after the last one.
+        self.write_len: dict[int, int] = {}
 
     @property
     def nbytes(self) -> int:
@@ -138,11 +141,13 @@ class PagedKVCache:
             raise ValueError(f"sequence {seq_id} already exists")
         self.block_tables[seq_id] = []
         self.seq_len[seq_id] = 0
+        self.write_len[seq_id] = 0
 
     def free_sequence(self, seq_id: int) -> None:
         for block in self.block_tables.pop(seq_id):
             self.allocator.free(block)
         self.seq_len.pop(seq_id)
+        self.write_len.pop(seq_id, None)
 
     def _ensure_capacity(self, seq_id: int, new_len: int) -> None:
         """Grow a sequence's block table so it can hold new_len tokens."""
@@ -173,6 +178,8 @@ class PagedKVCache:
             self.k[layer, block, off] = k[i]
             self.v[layer, block, off] = v[i]
 
+        if layer == 0:
+            self.write_len[seq_id] = end
         if layer == self.n_layers - 1:
             self.seq_len[seq_id] = end
 
@@ -185,7 +192,7 @@ class PagedKVCache:
         week 5's Triton kernel reads the blocks in place via the block table
         and never materialises this gather. Correct first, fused later.
         """
-        n = self.seq_len[seq_id]
+        n = self.write_len[seq_id]
         table = self.block_tables[seq_id]
         n_blocks = (n + BLOCK_SIZE - 1) // BLOCK_SIZE
         idx = torch.tensor(table[:n_blocks], device=self.device, dtype=torch.long)

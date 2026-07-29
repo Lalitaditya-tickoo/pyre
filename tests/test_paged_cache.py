@@ -198,3 +198,16 @@ def test_paged_decode_matches_cached(prompt):
             f"  cached: {a[max(0, first-3):first+3]}\n"
             f"  paged:  {b[max(0, first-3):first+3]}"
         )
+
+
+def test_gather_valid_after_layer_zero():
+    """gather() must return the full prefix after ANY layer writes it, not only
+    after the last layer commits seq_len. This is the bug that made paged decode
+    diverge at token 0: gather read seq_len (still 0 on layer 0) and returned an
+    empty prefix, so attention saw nothing."""
+    cache = _tiny_cache(num_blocks=8)
+    cache.add_sequence(0)
+    k = torch.ones(5, 2, 4)
+    cache.append(layer=0, seq_id=0, k=k, v=k)      # only layer 0 so far
+    gk, gv = cache.gather(layer=0, seq_id=0)
+    assert gk.shape == (5, 2, 4), "gather after layer 0 must see all 5 tokens, not 0"

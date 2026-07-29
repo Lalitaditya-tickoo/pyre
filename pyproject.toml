@@ -28,8 +28,9 @@ include = ["pyre*"]
 line-length = 120
 target-version = "py310"
 
-[tool.ruff.lint]
-select = ["E", "F", "I"]
-
 [tool.pytest.ini_options]
 markers = ["gpu: requires a CUDA device and downloaded model weights"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+ignore = ["E701", "E702", "E501"]
