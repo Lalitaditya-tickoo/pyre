@@ -167,6 +167,41 @@ Blocks are allocated on demand and freed back to a shared pool, with ref-count
 scaffolding in place for week 6's copy-on-write prefix sharing.
 
 ## Week 4 — continuous batching
+
+```bash
+python bench/bench_batch.py --batches 1 4 8 16 32
+```
+
+A scheduler admits requests into a running batch, steps them together, and
+evicts on completion so a finished sequence's slot is immediately reused. Output
+is proven token-identical to single-sequence decoding (`test_batched_matches_single`)
+even when sequences finish at different steps — the case static batching handles
+badly.
+
+**Correctness is done. Throughput is not, and the reason is the point.**
+
+| batch | tok/s | vs HF bs32 |
+|---|---|---|
+| 1 | 27.9 | 0.03× |
+| 4 | 48.2 | 0.05× |
+| 8 | 53.3 | 0.06× |
+| 16 | 56.9 | 0.06× |
+| 32 | 59.1 | 0.07× |
+
+Throughput is nearly flat across a 32× batch range. That flatness is the tell:
+the sequences are *not* sharing the expensive work. The projections and MLP are
+batched across the running set, but they are memory-bound, so batching them is
+almost free. The attention is computed in a Python loop over sequences — one
+small GEMM per sequence, per layer — which serialises ~B×L kernel launches per
+decode step. At batch 32 that is ~900 launches per token, and launch latency,
+not compute, is the wall.
+
+So this number measures Python-loop and launch overhead, not batched inference.
+The scheduler is correct; the attention it calls is a placeholder. Week 5
+replaces it with a single fused, block-table-aware Triton kernel that computes
+all B sequences in one launch — which is what converts this scaling into real
+throughput. The gap between 59 and HF's 904 is precisely the kernel's job.
+
 ## Week 5 — Triton paged-attention kernel
 ## Week 6 — radix prefix cache
 ## Week 7 — speculative decoding
