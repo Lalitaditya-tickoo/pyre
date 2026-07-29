@@ -235,6 +235,33 @@ sequences batched, the more per-sequence launches the kernel eliminates. Week 4'
 flat 28→59 became a climbing 38→138.
 
 ## Week 6 — radix prefix cache
+
+The week-1 baseline showed the target: at batch 32 the shared_prefix suite had
+5x worse TTFT than short, because every request re-prefilled an identical
+preamble. A radix tree (a trie over token sequences) indexes cached prefixes;
+when a new request's prompt matches a cached prefix, its KV blocks are reused
+via reference counting instead of recomputed, and only the divergent suffix is
+prefilled. This is what the block allocator's ref_count scaffolding (week 3) was
+built for.
+
+**Correctness:** requests sharing a preamble, served with prefix-block reuse,
+produce token-identical output to the same requests prefilled from scratch
+(`test_radix_prefix_matches_no_radix`). Reuse changes what is recomputed, never
+what is generated.
+
+**When it pays off — measured honestly.** The saving is proportional to shared
+prefix length. On a 41-token (2-block) shared preamble with Qwen2.5-0.5B, the
+speedup is ~1.0x: prefilling two blocks is negligible against per-request decode
+setup, so there is almost nothing to save. The cache earns its keep on the
+workload it was designed for — long shared system prompts of hundreds of tokens,
+where re-prefilling the preamble dominates TTFT. The mechanism is the same; only
+the prefix length that makes it worthwhile changes. Reporting a large number here
+would require a synthetic long-preamble setup; the honest result is that the
+feature is correct and its benefit scales with prefix length.
+
+Radix caching is a scheduler flag (`use_radix`), off by default in the
+correctness path so the two can be compared directly.
+
 ## Week 7 — speculative decoding
 ## Week 8 — vLLM comparison
 
