@@ -292,7 +292,21 @@ over the k new positions, with a cache rollback to the accepted length on
 partial acceptance. That rollback is the real work and is the documented next
 step. The algorithm and its exactness are proven; the optimization is scoped.
 
-## Week 8 — vLLM comparison
+## Week 8 — OpenAI-compatible server
+
+The engine is wrapped behind the OpenAI Chat Completions API, so any OpenAI
+client points at it and works unchanged.
+Verified live: a request returns a standard chat.completion object with real
+usage counts, and streaming yields tokens one at a time in the exact OpenAI SSE
+delta format. Requests flow through the same continuous-batching, paged-attention
+engine built across weeks 1-7.
+
+```bash
+python scripts/serve.py --model Qwen/Qwen2.5-0.5B-Instruct --port 8000
+```
+
+This is what makes the engine a service rather than a library.
+
 
 ---
 
