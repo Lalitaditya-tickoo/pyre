@@ -166,3 +166,35 @@ def test_paged_gather_matches_contiguous_forward():
         assert torch.equal(gk, ck), f"paged keys differ from contiguous at layer {layer}"
         assert torch.equal(gv, cv), f"paged values differ from contiguous at layer {layer}"
     assert ref.shape[1] == n
+
+
+@requires_cuda
+@pytest.mark.gpu
+@pytest.mark.parametrize("prompt", ["Explain what a hash table is.", "def fibonacci(n):"])
+def test_paged_decode_matches_cached(prompt):
+    """The headline paged invariant: scattered-block storage must produce the
+    exact same tokens as the contiguous cache. Storage changed, output did not."""
+    from transformers import AutoTokenizer
+
+    from pyre.loader import load_model
+
+    model, cfg = load_model(MODEL, device="cuda", dtype=torch.float16)
+    tok = AutoTokenizer.from_pretrained(MODEL)
+    ids = tok(prompt, return_tensors="pt").input_ids.cuda()
+    n = 32
+
+    cached = model.generate_cached(ids, max_new_tokens=n)
+
+    num_blocks = (ids.shape[1] + n) // BLOCK_SIZE + 4
+    paged_cache = PagedKVCache.for_model(cfg, num_blocks, "cuda", torch.float16)
+    paged = model.generate_paged(ids, max_new_tokens=n, paged_cache=paged_cache, seq_id=0)
+
+    a = cached[0, ids.shape[1]:].tolist()
+    b = paged[0, ids.shape[1]:].tolist()
+    if a != b:
+        first = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), 0)
+        pytest.fail(
+            f"paged decode diverged from cached at token {first}\n"
+            f"  cached: {a[max(0, first-3):first+3]}\n"
+            f"  paged:  {b[max(0, first-3):first+3]}"
+        )

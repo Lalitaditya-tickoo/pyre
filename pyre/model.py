@@ -246,3 +246,69 @@ class PyreQwen2(nn.Module):
             pos += 1
 
         return torch.cat([input_ids, *out], dim=1)
+
+    @torch.inference_mode()
+    def forward_paged(self, input_ids, paged_cache, seq_id, start_pos):
+        """Forward pass reading/writing KV through the paged cache.
+
+        Same math as forward(); the only difference is where keys and values
+        live. Each layer appends its new k/v to the sequence's blocks, then
+        gathers the full prefix back out. gather() is the slow, obvious version
+        that materialises a contiguous tensor so the week-2 attention runs
+        unchanged; week 5's kernel reads the blocks in place and deletes it.
+        """
+        B, S = input_ids.shape
+        assert B == 1, "paged decode path is single-sequence; batching is week 4"
+        x = self.model.embed_tokens(input_ids)
+        cos, sin = self._rope(start_pos, S, x.device, x.dtype)
+
+        for i, layer in enumerate(self.model.layers):
+            h = layer.input_layernorm(x)
+            attn = layer.self_attn
+            q = attn.q_proj(h).view(B, S, attn.n_heads, attn.head_dim).transpose(1, 2)
+            k = attn.k_proj(h).view(B, S, attn.n_kv, attn.head_dim).transpose(1, 2)
+            v = attn.v_proj(h).view(B, S, attn.n_kv, attn.head_dim).transpose(1, 2)
+            q, k = apply_rope(q, k, cos, sin)
+
+            # store the new tokens (S, n_kv, hd), then read the whole prefix back
+            paged_cache.append(i, seq_id, k[0].transpose(0, 1), v[0].transpose(0, 1))
+            gk, gv = paged_cache.gather(i, seq_id)          # (T, n_kv, hd)
+            kk = gk.transpose(0, 1).unsqueeze(0)            # (1, n_kv, T, hd)
+            vv = gv.transpose(0, 1).unsqueeze(0)
+
+            kk = repeat_kv(kk, self.cfg.n_rep)
+            vv = repeat_kv(vv, self.cfg.n_rep)
+
+            scores = torch.matmul(q, kk.transpose(-1, -2)) * attn.scale
+            if S > 1:
+                T = scores.shape[-1]
+                neg = torch.finfo(scores.dtype).min
+                mask = torch.full((S, T), neg, device=x.device, dtype=scores.dtype)
+                mask = torch.triu(mask, diagonal=start_pos + 1)
+                scores = scores + mask
+            probs = torch.softmax(scores.to(torch.float32), dim=-1).to(q.dtype)
+            o = torch.matmul(probs, vv).transpose(1, 2).reshape(B, S, attn.n_heads * attn.head_dim)
+            x = x + attn.o_proj(o)
+            x = x + layer.mlp(layer.post_attention_layernorm(x))
+
+        return self.lm_head(self.model.norm(x))
+
+    @torch.inference_mode()
+    def generate_paged(self, input_ids, max_new_tokens, paged_cache, seq_id, eos_id=None):
+        """Greedy decode against the paged cache. Must produce identical tokens
+        to generate_cached; the storage layout is the only thing that changed."""
+        B, S = input_ids.shape
+        paged_cache.add_sequence(seq_id)
+
+        logits = self.forward_paged(input_ids, paged_cache, seq_id, start_pos=0)
+        nxt = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        out = [nxt]
+        pos = S
+        for _ in range(max_new_tokens - 1):
+            if eos_id is not None and bool((nxt == eos_id).all()):
+                break
+            logits = self.forward_paged(nxt, paged_cache, seq_id, start_pos=pos)
+            nxt = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            out.append(nxt)
+            pos += 1
+        return torch.cat([input_ids, *out], dim=1)
