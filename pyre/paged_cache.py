@@ -188,7 +188,7 @@ class PagedKVCache:
         n = self.seq_len[seq_id]
         table = self.block_tables[seq_id]
         n_blocks = (n + BLOCK_SIZE - 1) // BLOCK_SIZE
-        idx = torch.tensor(table[:n_blocks], device=self.device)
+        idx = torch.tensor(table[:n_blocks], device=self.device, dtype=torch.long)
         k = self.k[layer, idx].reshape(-1, self.n_kv_heads, self.head_dim)[:n]
         v = self.v[layer, idx].reshape(-1, self.n_kv_heads, self.head_dim)[:n]
         return k, v

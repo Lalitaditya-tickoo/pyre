@@ -48,30 +48,46 @@ def main() -> None:
 
     per_tok = kv_bytes_per_token(cfg)
 
-    # Realistic mixed workload: most sequences finish well short of max_len.
+    mb = 1024 ** 2
     random.seed(args.seed)
-    actual_lengths = [random.randint(20, args.max_len) for _ in range(args.batch)]
 
-    # Contiguous: every sequence reserves the worst case.
+    # Contiguous reserves max_len for every sequence regardless of workload.
     reserved = args.batch * args.max_len * per_tok
 
-    # Paged: each sequence rounds up to whole blocks of its actual length.
-    used_blocks = sum((n + BLOCK_SIZE - 1) // BLOCK_SIZE for n in actual_lengths)
-    used = used_blocks * BLOCK_SIZE * per_tok
+    def paged_mb(lengths):
+        blocks = sum((n + BLOCK_SIZE - 1) // BLOCK_SIZE for n in lengths)
+        return blocks * BLOCK_SIZE * per_tok / mb, blocks
 
-    mb = 1024 ** 2
+    # Real inference traffic is short-skewed: most requests are brief, a few are
+    # long. Uniform is the adversarial worst case for paging (still wins). The
+    # exponential and short-heavy rows are what production actually looks like.
+    workloads = {
+        "uniform 20..max":   [random.randint(20, args.max_len) for _ in range(args.batch)],
+        "exponential (mean ~200)":
+            [min(args.max_len, max(20, int(random.expovariate(1 / 200)))) for _ in range(args.batch)],
+        "short-heavy (90% <128)":
+            [random.randint(20, 128) if random.random() < 0.9 else random.randint(128, args.max_len)
+             for _ in range(args.batch)],
+    }
+
     print(f"model: {cfg.num_hidden_layers}L, {cfg.num_key_value_heads} kv heads, "
           f"head_dim {cfg.head_dim}")
-    print(f"batch {args.batch}, max_len {args.max_len}, block {BLOCK_SIZE}")
-    print(f"KV per token: {per_tok / 1024:.1f} KB\n")
-    print(f"actual sequence lengths (sample): {sorted(actual_lengths)[:8]} ... "
-          f"mean {sum(actual_lengths) // args.batch}")
-    print(f"\ncontiguous reserved: {reserved / mb:8.1f} MB  (worst case for all {args.batch})")
-    print(f"paged used:          {used / mb:8.1f} MB  ({used_blocks} blocks)")
-    print(f"reduction:           {reserved / used:8.1f}x")
-    print(f"\nOn a 16 GB T4, contiguous caps batch at "
-          f"{int(16 * 1024 * mb / (args.max_len * per_tok))} sequences; "
-          f"paged fits far more by not reserving the worst case.")
+    print(f"batch {args.batch}, max_len {args.max_len}, block {BLOCK_SIZE}, "
+          f"KV/token {per_tok / 1024:.1f} KB")
+    print(f"\ncontiguous reserves {reserved / mb:.0f} MB for ALL workloads "
+          f"(worst case, {args.batch} x {args.max_len})\n")
+    print(f"{'workload':<26} {'mean len':>9} {'paged MB':>10} {'reduction':>10}")
+    print("-" * 58)
+    for name, lengths in workloads.items():
+        used_mb, blocks = paged_mb(lengths)
+        print(f"{name:<26} {sum(lengths) // len(lengths):>9} "
+              f"{used_mb:>10.1f} {reserved / mb / used_mb:>9.1f}x")
+
+    print(f"\nContiguous caps batch at "
+          f"{int(16 * 1024 * mb / (args.max_len * per_tok))} sequences on a 16 GB T4 "
+          f"(each reserving {args.max_len} tokens).")
+    print("Paged caps only on tokens actually generated, so a short-heavy batch "
+          "fits several times more sequences on the same card.")
 
 
 if __name__ == "__main__":

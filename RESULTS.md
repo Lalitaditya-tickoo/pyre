@@ -137,6 +137,35 @@ PYRE-cached also beats HF `generate()` at batch 1 (35.4 vs 28.2 tok/s, 1.26×),
 from lower per-step Python overhead — attention is still unfused until week 5.
 
 ## Week 3 — paged KV cache
+
+```bash
+python bench/bench_memory.py
+```
+
+KV memory split into fixed 16-token blocks from a shared pool. Each sequence
+holds a block table and grows one block at a time, instead of the contiguous
+cache reserving `max_len` up front. Paged decode is proven token-identical to
+the contiguous cache (`test_paged_decode_matches_cached`).
+
+Qwen2.5-1.5B, batch 32, max_len 1024. Contiguous reserves **896 MB** for every
+workload — the worst case, whether or not sequences reach it.
+
+| workload | mean len | paged used | reduction |
+|---|---|---|---|
+| uniform 20..1024 | 585 | 520 MB | 1.7× |
+| exponential (mean ~200) | 186 | 170 MB | 5.3× |
+| short-heavy (90% <128) | 159 | 145 MB | **6.2×** |
+
+Uniform is the adversarial case for paging and it still wins 1.7×. Real
+inference traffic is short-skewed — most requests brief, a few long — where
+paging uses **5–6× less** KV memory. That reclaimed memory is what lets batch
+size grow, and batch size is where week 4's throughput comes from: the week 2
+sweep showed batch-1 decode is weight-bandwidth-bound, so the only way to more
+throughput is amortising one weight read across more sequences.
+
+Blocks are allocated on demand and freed back to a shared pool, with ref-count
+scaffolding in place for week 6's copy-on-write prefix sharing.
+
 ## Week 4 — continuous batching
 ## Week 5 — Triton paged-attention kernel
 ## Week 6 — radix prefix cache
