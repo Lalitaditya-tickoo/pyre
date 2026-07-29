@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 
 import torch
 
-from pyre.paged_cache import PagedKVCache
+from pyre.paged_cache import BLOCK_SIZE, PagedKVCache
+from pyre.radix import RadixTree
 
 
 @dataclass
@@ -33,6 +34,8 @@ class Scheduler:
         self.waiting = []
         self.running = []
         self._next_seq = 0
+        self.radix = RadixTree(BLOCK_SIZE)
+        self.use_radix = True
 
     def add_request(self, prompt_ids, max_new_tokens, eos_id=None):
         r = Request(self._next_seq, list(prompt_ids), max_new_tokens, eos_id)
@@ -40,12 +43,40 @@ class Scheduler:
         self.waiting.append(r)
         return r.seq_id
 
-    def _admit(self):
+    def _admit(self) -> None:
+        """Admit waiting requests. If radix caching is on, reuse cached prefix
+        blocks and prefill only the divergent suffix."""
         while self.waiting and len(self.running) < self.max_batch:
             r = self.waiting.pop(0)
-            self.cache.add_sequence(r.seq_id)
+
+            covered = 0
+            if self.use_radix:
+                matched, shared = self.radix.match(r.prompt_ids)
+                if matched > 0:
+                    covered = self.cache.add_sequence_with_prefix(r.seq_id, shared)
+
+            if covered == 0:
+                self.cache.add_sequence(r.seq_id)
+
+            # prefill from `covered` onward. When covered>0 the prefix KV is
+            # already present, so we only run the forward over the suffix. To
+            # keep the reference-correct forward simple we still run the whole
+            # prompt through forward_paged but starting at position `covered`,
+            # feeding only the uncached suffix tokens.
             ids = torch.tensor([r.prompt_ids], device=self.device)
-            logits = self.model.forward_paged(ids, self.cache, r.seq_id, start_pos=0)
+            if covered > 0:
+                suffix = ids[:, covered:]
+                logits = self.model.forward_paged(suffix, self.cache, r.seq_id, start_pos=covered)
+            else:
+                logits = self.model.forward_paged(ids, self.cache, r.seq_id, start_pos=0)
+
+            # register whole-block prefixes of this prompt for future reuse
+            if self.use_radix:
+                n_whole = (len(r.prompt_ids) // BLOCK_SIZE) * BLOCK_SIZE
+                if n_whole > 0:
+                    blocks = self.cache.block_tables[r.seq_id][:n_whole // BLOCK_SIZE]
+                    self.radix.insert(r.prompt_ids[:n_whole], blocks)
+
             nxt = int(logits[0, -1].argmax())
             r.generated.append(nxt)
             if nxt == r.eos_id or len(r.generated) >= r.max_new_tokens:

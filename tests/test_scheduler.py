@@ -84,3 +84,36 @@ def test_scheduler_frees_all_blocks():
 
     assert sched.cache.allocator.num_used == 0, "scheduler leaked KV blocks"
     assert not sched.running and not sched.waiting
+
+
+@requires_cuda
+@pytest.mark.gpu
+def test_radix_prefix_matches_no_radix():
+    """Requests sharing a long prefix, served with prefix reuse, must produce
+    token-identical output to the same requests with radix disabled. Reuse
+    changes what is recomputed, never what is generated."""
+    from transformers import AutoTokenizer
+
+    from pyre.loader import load_model
+    from pyre.scheduler import Scheduler
+
+    model, cfg = load_model(MODEL, device="cuda", dtype=torch.float16)
+    tok = AutoTokenizer.from_pretrained(MODEL)
+
+    preamble = "You are a careful assistant. Answer precisely and concisely. "
+    prompts = [preamble + q for q in ["What is a hash table?", "What is a stack?", "What is a queue?"]]
+
+    def run(use_radix):
+        sched = Scheduler(model, cfg, num_blocks=512, max_batch=8, device="cuda")
+        sched.use_radix = use_radix
+        idmap = {}
+        for i, p in enumerate(prompts):
+            sid = sched.add_request(tok(p, return_tensors="pt").input_ids[0].tolist(), 24)
+            idmap[sid] = i
+        res = sched.run()
+        return {idmap[sid]: g for sid, g in res.items()}
+
+    with_radix = run(True)
+    without = run(False)
+    for i in range(len(prompts)):
+        assert with_radix[i] == without[i], f"prompt {i}: radix reuse changed the output"

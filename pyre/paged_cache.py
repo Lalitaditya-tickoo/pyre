@@ -143,6 +143,23 @@ class PagedKVCache:
         self.seq_len[seq_id] = 0
         self.write_len[seq_id] = 0
 
+    def add_sequence_with_prefix(self, seq_id: int, shared_blocks: list) -> int:
+        """Start a sequence that reuses already-cached prefix blocks.
+
+        The shared blocks are ref-counted (incref), not copied: several
+        sequences point at the same physical KV for the shared prefix. Returns
+        the number of prefix tokens already covered, so the caller prefills only
+        the suffix. This is the payoff of week 3's ref_count scaffolding.
+        """
+        if seq_id in self.block_tables:
+            raise ValueError(f"sequence {seq_id} already exists")
+        for blk in shared_blocks:
+            self.allocator.incref(blk)
+        self.block_tables[seq_id] = list(shared_blocks)
+        covered = len(shared_blocks) * BLOCK_SIZE
+        self.seq_len[seq_id] = covered
+        return covered
+
     def free_sequence(self, seq_id: int) -> None:
         for block in self.block_tables.pop(seq_id):
             self.allocator.free(block)
