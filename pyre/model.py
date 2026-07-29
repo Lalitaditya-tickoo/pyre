@@ -294,6 +294,47 @@ class PyreQwen2(nn.Module):
         return self.lm_head(self.model.norm(x))
 
     @torch.inference_mode()
+    def forward_paged_batch(self, tokens, paged_cache, seq_ids, positions):
+        """One decode step for a batch of sequences at different positions.
+
+        tokens: (B, 1) last token of each running sequence.
+        seq_ids: B sequence ids into the paged cache.
+        positions: B absolute positions for per-sequence RoPE.
+
+        Each sequence has its own block table and length, so attention runs per
+        sequence and results are stacked. Obvious correct version; a real engine
+        fuses this into one block-table-aware kernel. Correct now, fused later.
+        """
+        B, S = tokens.shape
+        assert S == 1, "batched path is decode-only"
+        x = self.model.embed_tokens(tokens)
+
+        for i, layer in enumerate(self.model.layers):
+            h = layer.input_layernorm(x)
+            attn = layer.self_attn
+            q = attn.q_proj(h).view(B, 1, attn.n_heads, attn.head_dim).transpose(1, 2)
+            k = attn.k_proj(h).view(B, 1, attn.n_kv, attn.head_dim).transpose(1, 2)
+            v = attn.v_proj(h).view(B, 1, attn.n_kv, attn.head_dim).transpose(1, 2)
+
+            outs = []
+            for b in range(B):
+                cos, sin = self._rope(positions[b], 1, x.device, x.dtype)
+                qb, kb = apply_rope(q[b:b+1], k[b:b+1], cos, sin)
+                paged_cache.append(i, seq_ids[b], kb[0].transpose(0, 1), v[b].transpose(0, 1))
+                gk, gv = paged_cache.gather(i, seq_ids[b])
+                kk = repeat_kv(gk.transpose(0, 1).unsqueeze(0), self.cfg.n_rep)
+                vv = repeat_kv(gv.transpose(0, 1).unsqueeze(0), self.cfg.n_rep)
+                scores = torch.matmul(qb, kk.transpose(-1, -2)) * attn.scale
+                probs = torch.softmax(scores.to(torch.float32), dim=-1).to(qb.dtype)
+                o = torch.matmul(probs, vv).transpose(1, 2).reshape(1, 1, attn.n_heads * attn.head_dim)
+                outs.append(attn.o_proj(o))
+
+            x = x + torch.cat(outs, dim=0)
+            x = x + layer.mlp(layer.post_attention_layernorm(x))
+
+        return self.lm_head(self.model.norm(x))
+
+    @torch.inference_mode()
     def generate_paged(self, input_ids, max_new_tokens, paged_cache, seq_id, eos_id=None):
         """Greedy decode against the paged cache. Must produce identical tokens
         to generate_cached; the storage layout is the only thing that changed."""
