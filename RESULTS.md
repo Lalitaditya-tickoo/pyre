@@ -263,6 +263,35 @@ Radix caching is a scheduler flag (`use_radix`), off by default in the
 correctness path so the two can be compared directly.
 
 ## Week 7 — speculative decoding
+
+A 0.5B draft proposes k=4 tokens ahead; the 1.5B target verifies all k in one
+forward pass, accepting the longest prefix matching its own greedy choice and
+correcting at the first mismatch. The accept/emit rule makes it **exact** —
+token-identical to greedy decoding with the target alone.
+
+**Correctness:** output matches target-only greedy on every prompt tested
+(`test_speculative_matches_greedy` plus the live 1.5B/0.5B comparison).
+
+**Draft acceptance (1.5B target, 0.5B draft, k=4):**
+
+| workload | accept rate | tokens/target-pass |
+|---|---|---|
+| prose | 84% | 4.36 |
+| code | 48% | 2.91 |
+| factual | 55% | 3.10 |
+
+The small draft predicts the large model's next token 84% of the time on
+predictable prose — the mechanism works exactly as theory predicts.
+
+**Why it is not yet a speedup, and the fix.** Wall-clock is currently 0.6–0.9×.
+The cause is specific: the target's verify uses the naive no-cache forward,
+O(n²) per verify instead of O(k). The formula
+`accepted_per_pass / (1 + draft_cost/target_cost)` cannot win when both models
+pay quadratic cost. The fix is cache-aware verification — a single cached forward
+over the k new positions, with a cache rollback to the accepted length on
+partial acceptance. That rollback is the real work and is the documented next
+step. The algorithm and its exactness are proven; the optimization is scoped.
+
 ## Week 8 — vLLM comparison
 
 ---
